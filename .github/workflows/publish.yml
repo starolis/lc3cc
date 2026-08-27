@@ -72,6 +72,5 @@ jobs:
           printf 'tarball=%s\n' "$tarball" >> "$GITHUB_OUTPUT"
       - name: Publish exact artifact with provenance
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           PACKAGE_TARBALL: ${{ steps.pack.outputs.tarball }}
         run: npm publish "./$PACKAGE_TARBALL" --ignore-scripts --provenance --access public

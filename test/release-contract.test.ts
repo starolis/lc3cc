@@ -138,7 +138,6 @@ const EXPECTED_ACTIONS = [
 
 const EXPECTED_WORKFLOWS = ['ci.yml', 'publish.yml'] as const;
 const PRIVATE_REPORT_URL = 'https://github.com/starolis/lc3cc/security/advisories/new';
-const EXPECTED_NPM_SECRET = ['secrets', 'NPM_TOKEN'].join('.');
 const EXPECTED_TAR_SHA256 = 'd8df4ceb870d0375cd2ed4bea710ef32b8f0bc20ecc707a095090258b0720e8f';
 
 const MARKDOWN_FILES = [
@@ -359,7 +358,8 @@ describe('standalone release contract', () => {
     expect(publish).toContain(EXPECTED_TAR_SHA256);
     expect([...publish.matchAll(/npm publish /g)]).toHaveLength(1);
     expect(publish).toContain('--provenance --access public');
-    expect(secretReferences).toEqual([EXPECTED_NPM_SECRET]);
+    expect(secretReferences).toEqual([]);
+    expect(publish).not.toContain(['NODE', 'AUTH', 'TOKEN'].join('_'));
     expect(publish).not.toMatch(/pull_request|pull_request_target|workflow_run|^\s*push:\s*$/m);
     expect(publish).not.toMatch(/actions\/(?:checkout|setup-node)@v\d/);
   });
