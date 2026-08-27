@@ -6,11 +6,10 @@ subset and stable public outputs.
 
 ## Before starting
 
-- If the repository exposes an issue tracker, search it before opening a
-  duplicate; otherwise review open pull requests for overlapping work.
+- Search the [issue tracker](https://github.com/starolis/lc3cc/issues) before
+  opening a duplicate, and review open pull requests for overlapping work.
 - For a language-surface or output-format change, propose the compatibility
-  decision before implementation. Use an issue when that surface is available,
-  or a clearly labeled proposal pull request when it is not.
+  decision in an issue before implementation.
 - Read [SECURITY.md](SECURITY.md) before sharing a suspected vulnerability. Do
   not put sensitive details in a public issue or pull request.
 
@@ -62,9 +61,8 @@ boundary.
 
 ## Bug reports
 
-For an ordinary, non-sensitive bug, use the issue tracker when the repository
-exposes one. If it does not, a narrowly scoped pull request may carry the report
-and its reproducing test.
+For an ordinary, non-sensitive bug, use the
+[issue tracker](https://github.com/starolis/lc3cc/issues/new).
 
 A useful report includes:
 
