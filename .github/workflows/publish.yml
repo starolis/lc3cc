@@ -1,0 +1,77 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish lc3cc
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.19.0
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Verify release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          test "$GITHUB_REF" = "refs/tags/v${version}"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse "refs/tags/v${version}^{commit}")" = "$GITHUB_SHA"
+          test "$(node -p "require('./package.json').private")" = false
+          test ! -e NOT-PUBLISHABLE
+          npm_version="$(npm --version)"
+          node -e "const [a,b]=process.argv[1].split('.').map(Number); if (a<11 || (a===11 && b<5)) process.exit(1)" "$npm_version"
+      - name: Verify registry version is unclaimed
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          registry_log="$RUNNER_TEMP/npm-view.log"
+          if npm view "lc3cc@${version}" version > "$registry_log" 2>&1; then
+            printf 'lc3cc@%s already exists on npm\n' "$version" >&2
+            cat "$registry_log" >&2
+            exit 1
+          fi
+          grep -q 'E404' "$registry_log"
+      - run: npm run content:check
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run package:check
+      - name: Pack exact artifact
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pack --ignore-scripts --json > "$RUNNER_TEMP/npm-pack.json"
+          tarball="$(node -e "const [r]=JSON.parse(require('node:fs').readFileSync(process.argv[1],'utf8')); if (!r?.filename || r.files?.length !== 60) process.exit(1); process.stdout.write(r.filename)" "$RUNNER_TEMP/npm-pack.json")"
+          test -f "$tarball"
+          tar_sha="$(gzip -dc "$tarball" | sha256sum | cut -d' ' -f1)"
+          test "$tar_sha" = "d8df4ceb870d0375cd2ed4bea710ef32b8f0bc20ecc707a095090258b0720e8f"
+          printf 'tarball=%s\n' "$tarball" >> "$GITHUB_OUTPUT"
+      - name: Publish exact artifact with provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PACKAGE_TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: npm publish "./$PACKAGE_TARBALL" --ignore-scripts --provenance --access public

@@ -1,8 +1,84 @@
-# Contributing
+# Contributing to lc3cc
 
-lc3cc is developed and verified upstream and exported to this repository;
-the development model is documented in the README section that ships with
-v1.0.0.
+Thank you for helping improve `lc3cc`. Contributions should preserve its narrow
+purpose: a readable, compile-only C-to-LC-3 tool with a documented teaching
+subset and stable public outputs.
 
-Issues and pull requests are welcome. Contribution details land with the
-initial release.
+## Before starting
+
+- If the repository exposes an issue tracker, search it before opening a
+  duplicate; otherwise review open pull requests for overlapping work.
+- For a language-surface or output-format change, propose the compatibility
+  decision before implementation. Use an issue when that surface is available,
+  or a clearly labeled proposal pull request when it is not.
+- Read [SECURITY.md](SECURITY.md) before sharing a suspected vulnerability. Do
+  not put sensitive details in a public issue or pull request.
+
+## Development environment
+
+Use a supported Node.js release: `^22.0.0`, `^24.0.0`, or `^26.0.0`.
+
+Install dependencies from the checked-in lockfile:
+
+```sh
+npm ci
+```
+
+The root `package.json` is the authority for available commands. Before sending
+a change, run the complete local checks:
+
+```sh
+npm test
+npm run typecheck
+npm run lint
+npm run format:check
+npm run build
+```
+
+Do not hand-edit generated build output.
+
+## Source flow
+
+The standalone repository is a curated export from a separate canonical
+development tree. Source flow runs one way into the standalone repository.
+Maintainers may reapply an accepted public change to the canonical source and
+return it through a later export, so commit IDs are not preserved across that
+boundary.
+
+## Change guidelines
+
+- Add focused tests that fail without the behavior being changed.
+- Keep diagnostics actionable and deterministic.
+- Treat emitted assembly, compiler diagnostics, public TypeScript exports, and
+  the line-map schema as compatibility surfaces.
+- Update [docs/c-subset.md](docs/c-subset.md) whenever accepted or rejected C
+  syntax changes.
+- Update [docs/line-map.md](docs/line-map.md) and its JSON schema together when
+  line-map semantics change.
+- Keep source, tests, comments, examples, and generated artifacts free of
+  secrets, machine-local paths, and unrelated material.
+- Do not add an assembler, linker, simulator, debugger, or execution command
+  under the compiler CLI without an explicit scope decision.
+
+## Bug reports
+
+For an ordinary, non-sensitive bug, use the issue tracker when the repository
+exposes one. If it does not, a narrowly scoped pull request may carry the report
+and its reproducing test.
+
+A useful report includes:
+
+- the smallest C input that reproduces the behavior;
+- the exact command or library call;
+- expected and actual diagnostics or assembly;
+- the `lc3cc` and Node.js versions; and
+- the operating system and relevant filesystem details for I/O issues.
+
+Please avoid attaching confidential source code. Reduce the example or create a
+synthetic reproducer instead.
+
+## Pull requests
+
+Keep each pull request focused. Describe the user-visible effect, the tests that
+own it, and any compatibility consequence. A change is ready when its tests,
+types, formatting, build, documentation, and package-boundary checks pass.

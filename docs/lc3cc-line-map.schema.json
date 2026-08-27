@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "lc3cc line map v1",
+  "description": "A deterministic mapping from C source lines to emitted LC-3 assembly source lines.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "schemaVersion",
+    "compilerVersion",
+    "artifact",
+    "source",
+    "assembly",
+    "mappings"
+  ],
+  "properties": {
+    "format": {
+      "const": "lc3cc-line-map"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "compilerVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "artifact": {
+      "enum": ["program", "fragment"]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The input operand exactly as supplied by the user."
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        }
+      }
+    },
+    "assembly": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "lineCount"],
+      "properties": {
+        "path": {
+          "type": ["string", "null"],
+          "description": "The -o operand exactly as supplied, or null for standard output."
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "lineCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "mappings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/mapping"
+      }
+    }
+  },
+  "definitions": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "mapping": {
+      "type": "object",
+      "description": "An inclusive assembly-source-line range. Semantic validation also requires asmStart <= asmEnd <= assembly.lineCount.",
+      "additionalProperties": false,
+      "required": ["cLine", "asmStart", "asmEnd", "kind"],
+      "properties": {
+        "cLine": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "asmStart": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "asmEnd": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "enum": ["stmt", "prologue", "epilogue", "call", "data", "startup", "runtime"]
+        }
+      }
+    }
+  }
+}

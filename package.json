@@ -1,0 +1,63 @@
+{
+  "name": "lc3cc",
+  "version": "1.0.0",
+  "private": false,
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  },
+  "description": "C-to-LC-3 compiler and TypeScript library",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/starolis/lc3cc.git"
+  },
+  "bugs": {
+    "url": "https://github.com/starolis/lc3cc/issues"
+  },
+  "homepage": "https://github.com/starolis/lc3cc#readme",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "lc3cc": "./dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "README.md",
+    "SECURITY.md"
+  ],
+  "engines": {
+    "node": "^22.0.0 || ^24.0.0 || ^26.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "content:check": "node --test scripts/check-book-ip.test.mjs && node scripts/check-book-ip.mjs --root . && node scripts/check-book-ip.mjs --root . --history",
+    "package:check": "node --test scripts/check-package.test.mjs && node scripts/check-package.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "eslint": "^9.30.0",
+    "prettier": "^3.6.0",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.35.0",
+    "vitest": "^4.1.10"
+  }
+}
