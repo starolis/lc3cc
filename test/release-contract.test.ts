@@ -20,6 +20,7 @@ interface PackageManifest {
   readonly license: string;
   readonly main: string;
   readonly name: string;
+  readonly overrides: Record<string, Record<string, string>>;
   readonly private: boolean;
   readonly publishConfig: {
     readonly access: string;
@@ -99,6 +100,13 @@ const EXPECTED_DEV_DEPENDENCIES = {
   vitest: '^4.1.10',
 } as const;
 
+// typescript-eslint still asks for minimatch 10, which carries a
+// denial-of-service advisory fixed in 11.0.1. Remove this when a
+// typescript-eslint release asks for 11 itself.
+const EXPECTED_OVERRIDES = {
+  '@typescript-eslint/typescript-estree': { minimatch: '^11.0.1' },
+} as const;
+
 const EXPECTED_PACKAGE_FILES = [
   'dist',
   'docs',
@@ -122,6 +130,7 @@ const EXPECTED_PACKAGE_KEYS = [
   'license',
   'main',
   'name',
+  'overrides',
   'private',
   'publishConfig',
   'repository',
@@ -132,13 +141,13 @@ const EXPECTED_PACKAGE_KEYS = [
 ] as const;
 
 const EXPECTED_ACTIONS = [
-  'actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803',
-  'actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38',
+  'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+  'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
 ] as const;
 
 const EXPECTED_WORKFLOWS = ['ci.yml', 'publish.yml'] as const;
 const PRIVATE_REPORT_URL = 'https://github.com/starolis/lc3cc/security/advisories/new';
-const EXPECTED_TAR_SHA256 = 'd8df4ceb870d0375cd2ed4bea710ef32b8f0bc20ecc707a095090258b0720e8f';
+const EXPECTED_TAR_SHA256 = 'f33578e86b855b67afcd6c4cf4d939c6cac891ecb51a29a0ae6d35198be48e50';
 
 const MARKDOWN_FILES = [
   'CHANGELOG.md',
@@ -164,13 +173,43 @@ function includedInPackage(path: string, files: readonly string[]): boolean {
   return files.some((entry) => normalized === entry || normalized.startsWith(`${entry}/`));
 }
 
-function localMarkdownLinks(markdownPath: string): string[] {
+interface LocalLink {
+  readonly file: string;
+  readonly heading: string | null;
+}
+
+function localMarkdownLinks(markdownPath: string): LocalLink[] {
   const absolutePath = resolve(PACKAGE_ROOT, markdownPath);
   const markdown = readFileSync(absolutePath, 'utf8');
   return [...markdown.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)]
     .map((match) => match[1]!)
     .filter((target) => !target.startsWith('#') && !/^[a-z]+:/i.test(target))
-    .map((target) => relative(PACKAGE_ROOT, resolve(dirname(absolutePath), target)));
+    .map((target) => {
+      const [file, heading] = target.split('#', 2);
+      return {
+        file: relative(PACKAGE_ROOT, resolve(dirname(absolutePath), file!)),
+        heading: heading ?? null,
+      };
+    });
+}
+
+// The anchors a hosted Markdown renderer gives a file's headings.
+function headingAnchors(markdownPath: string): string[] {
+  const anchors: string[] = [];
+  let fenced = false;
+  for (const line of readFileSync(resolve(PACKAGE_ROOT, markdownPath), 'utf8').split('\n')) {
+    if (line.startsWith('```')) fenced = !fenced;
+    if (fenced || !/^#{1,6} /.test(line)) continue;
+    anchors.push(
+      line
+        .replace(/^#+ /, '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9 -]/g, '')
+        .replace(/ /g, '-'),
+    );
+  }
+  return anchors;
 }
 
 function fencedBlock(markdown: string, language: string): string {
@@ -207,7 +246,7 @@ describe('standalone release contract', () => {
 
     expect(Object.keys(manifest).sort()).toEqual([...EXPECTED_PACKAGE_KEYS].sort());
     expect(manifest.name).toBe('lc3cc');
-    expect(manifest.version).toBe('1.0.0');
+    expect(manifest.version).toBe('1.1.0');
     expect(manifest.private).toBe(false);
     expect(manifest.publishConfig).toEqual({
       access: 'public',
@@ -232,6 +271,7 @@ describe('standalone release contract', () => {
     expect(manifest.files).toEqual(EXPECTED_PACKAGE_FILES);
     expect(manifest.dependencies).toEqual({});
     expect(manifest.devDependencies).toEqual(EXPECTED_DEV_DEPENDENCIES);
+    expect(manifest.overrides).toEqual(EXPECTED_OVERRIDES);
     expect(manifest.engines.node).toBe('^22.0.0 || ^24.0.0 || ^26.0.0');
     expect(manifest.scripts).toEqual(EXPECTED_SCRIPTS);
     expect(manifest).not.toHaveProperty('peerDependencies');
@@ -252,9 +292,10 @@ describe('standalone release contract', () => {
       expect(manifest.scripts).not.toHaveProperty(lifecycle);
     }
     expect(existsSync(resolve(PACKAGE_ROOT, 'NOT-PUBLISHABLE'))).toBe(false);
+    expect(changelog).toContain('## 1.1.0 - 2026-11-13');
     expect(changelog).toContain('## 1.0.0 - 2026-08-27');
     expect(changelog).not.toContain('## Unreleased');
-    expect(security).toContain('| `1.0.x` | Yes');
+    expect(security).toContain('| `1.1.x` | Yes');
     expect(security).toContain(PRIVATE_REPORT_URL);
     expect(readme).not.toMatch(/not released yet|Install after release/);
   });
@@ -369,11 +410,12 @@ describe('standalone release contract', () => {
     const targets = MARKDOWN_FILES.flatMap(localMarkdownLinks);
 
     expect(targets.length).toBeGreaterThan(0);
-    for (const target of targets) {
-      expect(target.startsWith('..')).toBe(false);
-      expect(existsSync(resolve(PACKAGE_ROOT, target))).toBe(true);
-      expect(statSync(resolve(PACKAGE_ROOT, target)).isFile()).toBe(true);
-      expect(includedInPackage(target, manifest.files)).toBe(true);
+    for (const { file, heading } of targets) {
+      expect(file.startsWith('..')).toBe(false);
+      expect(existsSync(resolve(PACKAGE_ROOT, file))).toBe(true);
+      expect(statSync(resolve(PACKAGE_ROOT, file)).isFile()).toBe(true);
+      expect(includedInPackage(file, manifest.files)).toBe(true);
+      if (heading !== null) expect(headingAnchors(file)).toContain(heading);
     }
   });
 

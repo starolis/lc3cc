@@ -2,11 +2,14 @@
 
 ## Supported versions
 
-The 1.0.x line is the currently supported release line.
+The 1.1.x line is the currently supported release line. It accepts every
+program 1.0.x accepted and emits the same assembly for it, so moving up is the
+fix for anything found in 1.0.x.
 
 | Version | Security fixes |
 | ------- | -------------- |
-| `1.0.x` | Yes            |
+| `1.1.x` | Yes            |
+| `1.0.x` | No             |
 
 ## Reporting a vulnerability
 

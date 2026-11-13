@@ -18,11 +18,11 @@ jobs:
     timeout-minutes: 15
     environment: npm
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.19.0
           registry-url: https://registry.npmjs.org
@@ -68,7 +68,7 @@ jobs:
           tarball="$(node -e "const [r]=JSON.parse(require('node:fs').readFileSync(process.argv[1],'utf8')); if (!r?.filename || r.files?.length !== 60) process.exit(1); process.stdout.write(r.filename)" "$RUNNER_TEMP/npm-pack.json")"
           test -f "$tarball"
           tar_sha="$(gzip -dc "$tarball" | sha256sum | cut -d' ' -f1)"
-          test "$tar_sha" = "d8df4ceb870d0375cd2ed4bea710ef32b8f0bc20ecc707a095090258b0720e8f"
+          test "$tar_sha" = "f33578e86b855b67afcd6c4cf4d939c6cac891ecb51a29a0ae6d35198be48e50"
           printf 'tarball=%s\n' "$tarball" >> "$GITHUB_OUTPUT"
       - name: Publish exact artifact with provenance
         env:

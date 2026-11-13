@@ -29,7 +29,7 @@ int main(void) { return 0; }
 {
   "format": "lc3cc-line-map",
   "schemaVersion": 1,
-  "compilerVersion": "1.0.0",
+  "compilerVersion": "1.1.0",
   "artifact": "program",
   "source": {
     "path": "input.c",
@@ -142,6 +142,10 @@ Every mapping has:
 
 For every mapping, `asmStart <= asmEnd <= assembly.lineCount`. Mapping ranges
 describe assembly source lines, not addresses or emitted word counts.
+
+A `data` mapping can fall inside a function. That happens where the compiler
+placed an address or literal word beside the code that uses it; see
+[Code out of reach](c-subset.md#code-out-of-reach).
 
 ## Determinism
 

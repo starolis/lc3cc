@@ -27,7 +27,7 @@ int main(void) {
 Compile it without installing anything globally:
 
 ```sh
-npx --yes lc3cc@1.0.0 example.c -o example.asm --emit-map example.lc3map.json
+npx --yes lc3cc@1.1.0 example.c -o example.asm --emit-map example.lc3map.json
 ```
 
 The generated assembly includes the source relationship directly:
@@ -181,7 +181,7 @@ environment before depending on that combination.
 
 ## Releases and provenance
 
-The supported 1.0.x line begins with
+The current release line is 1.1.x, and the first release was
 [`lc3cc@1.0.0`](https://www.npmjs.com/package/lc3cc). npm displays the package's
 signed provenance, while source tags and release notes are available on
 [GitHub](https://github.com/starolis/lc3cc/releases). See

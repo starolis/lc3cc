@@ -2,6 +2,24 @@
 
 All notable user-visible changes to `lc3cc` are recorded here.
 
+## 1.1.0 - 2026-11-13
+
+### Added
+
+- Compile programs whose generated code lands out of PC-relative reach.
+  Version 1.0.0 rejected them with a "too far from its target" or "call range"
+  diagnostic. A branch or pooled load reaches from 256 words back to 255
+  ahead, and a call from 1024 back to 1023 ahead. Past that, the compiler now
+  emits a longer form that loads the address into `R3`, with a comment on the
+  line before it naming the target and the distance. A program that 1.0.0
+  compiled produces the same assembly. See
+  [Code out of reach](docs/c-subset.md#code-out-of-reach).
+
+### Fixed
+
+- A function named `f_POOL` no longer shares a label with the literal pool of
+  a function named `f`; 1.0.0 emitted that label twice.
+
 ## 1.0.0 - 2026-08-27
 
 ### Fixed

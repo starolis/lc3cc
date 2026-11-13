@@ -3,7 +3,7 @@
 // stack-frame calling convention described below.
 //
 // SCOPE: expressions, statements, globals, capacity guards, the full calling
-// convention, crt0, and capacity diagnostics for calls and address reach.
+// convention, crt0, and far forms for branches, loads, and calls out of reach.
 // Codegen assumes its input already passed check() with no error diagnostics;
 // it does not revalidate semantics, only emits code and reports its own
 // capacity diagnostics.
@@ -129,15 +129,63 @@ export const MAX_EMITTED_LINES = 262144;
 
 export class EmittedLinesExceededError extends Error {}
 
+// A line an emitter registered as rewritable when its target lands out of
+// PC-relative reach: a statement-level or short-circuit branch, a pooled
+// load, or a call. Unmarked lines are never rewritten.
+export type RelaxMark = 'branch' | 'load' | 'call';
+
 export class LineBuffer {
   lines: string[] = [];
+  // Parallel to `lines`.
+  marks: (RelaxMark | undefined)[] = [];
   entries: CLineMapEntry[] = [];
 
-  add(text: string): void {
+  add(text: string, mark?: RelaxMark): void {
     if (this.lines.length >= MAX_EMITTED_LINES) {
       throw new EmittedLinesExceededError();
     }
     this.lines.push(text);
+    this.marks.push(mark);
+  }
+
+  // Replaces one laid-out line with `replacement`. The entry that owns the
+  // line grows, every later entry and mark shifts, and each replacement line
+  // named in `dataOffsets` (an inline literal word) is split out of its owner
+  // as 'data'. This is the only operation that rewrites a laid-out line.
+  replaceLine(
+    lineNo: number,
+    replacement: readonly string[],
+    dataOffsets: readonly number[] = [],
+  ): void {
+    const delta = replacement.length - 1;
+    if (this.lines.length + delta > MAX_EMITTED_LINES) {
+      throw new EmittedLinesExceededError();
+    }
+    this.lines.splice(lineNo - 1, 1, ...replacement);
+    this.marks.splice(lineNo - 1, 1, ...replacement.map(() => undefined));
+
+    const dataLines = new Set(dataOffsets.map((offset) => lineNo + offset));
+    const entries: CLineMapEntry[] = [];
+    for (const entry of this.entries) {
+      if (entry.asmEnd < lineNo) {
+        entries.push(entry);
+        continue;
+      }
+      if (entry.asmStart > lineNo) {
+        entries.push({ ...entry, asmStart: entry.asmStart + delta, asmEnd: entry.asmEnd + delta });
+        continue;
+      }
+      const end = entry.asmEnd + delta;
+      let runStart = entry.asmStart;
+      for (let line = entry.asmStart; line <= end; line++) {
+        if (!dataLines.has(line)) continue;
+        if (line > runStart) entries.push({ ...entry, asmStart: runStart, asmEnd: line - 1 });
+        entries.push({ cLine: null, asmStart: line, asmEnd: line, kind: 'data' });
+        runStart = line + 1;
+      }
+      if (runStart <= end) entries.push({ ...entry, asmStart: runStart, asmEnd: end });
+    }
+    this.entries = entries;
   }
 
   get nextLineNo(): number {
@@ -477,14 +525,27 @@ class FnCtx {
   // outside the executed instruction path. The final reach pass validates
   // every generated load against its actual laid-out target distance.
   // Each island is therefore both locally readable and hardware-reachable.
+  // `L_<func>_POOL_<k>` is also what nextLabel() spells for a function whose
+  // label base is `<func>_POOL`, and the assembler's symbol table ignores
+  // case. Only when such a function exists, the island takes a prefix no
+  // identifier can produce, so every other program's output is unchanged.
+  private poolIslandLabel(): string {
+    const index = this.poolIslandCounter++;
+    const shadowed = `${this.funcName}_POOL`.toUpperCase();
+    for (const base of this.prog.funcLabels.values()) {
+      if (base.toUpperCase() === shadowed) return `LPOOL_${this.funcName}_${index}`;
+    }
+    return `L_${this.funcName}_POOL_${index}`;
+  }
+
   flushPoolIsland(buf: LineBuffer): void {
     if (this.pool.length === 0) {
       this.poolAnchor = buf.lastLineNo;
       return;
     }
-    const skip = `L_${this.funcName}_POOL_${this.poolIslandCounter++}`;
+    const skip = this.poolIslandLabel();
     const start = buf.nextLineNo;
-    buf.add(`BR ${skip}`);
+    buf.add(`BR ${skip}`, 'branch');
     for (const p of this.pool) buf.add(`${p.label} .FILL ${p.value}`);
     buf.add(`${skip}`);
     // The BR executes; the .FILLs are data. entrySplittingData draws that line
@@ -601,7 +662,7 @@ function emitLoadOffset(
     buf.add(`LDR ${reg(dest)},${base},#${offset}`);
     return;
   }
-  buf.add(`LD ${reg(dest)},${fn.poolConstant(offset)}`);
+  buf.add(`LD ${reg(dest)},${fn.poolConstant(offset)}`, 'load');
   buf.add(`ADD ${reg(dest)},${base},${reg(dest)}`);
   buf.add(`LDR ${reg(dest)},${reg(dest)},#0`);
 }
@@ -629,7 +690,7 @@ function emitStoreOffset(
     return;
   }
   const a = reg(STORE_ADDR_REG);
-  buf.add(`LD ${a},${fn.poolConstant(offset)}`);
+  buf.add(`LD ${a},${fn.poolConstant(offset)}`, 'load');
   buf.add(`ADD ${a},${base},${a}`);
   buf.add(`STR ${reg(src)},${a},#0`);
 }
@@ -671,7 +732,7 @@ function emitConstant(dest: number, value: number, buf: LineBuffer, fn: FnCtx): 
     if (v !== 0) buf.add(`ADD ${reg(dest)},${reg(dest)},#${v}`);
   } else {
     const label = fn.poolConstant(v);
-    buf.add(`LD ${reg(dest)},${label}`);
+    buf.add(`LD ${reg(dest)},${label}`, 'load');
   }
 }
 
@@ -691,7 +752,7 @@ function emitAddressOfSymbol(dest: number, sym: VarSymbol, e: FrameEmit): void {
     e.buf.add(`ADD ${reg(dest)},${base},#${sym.offset}`);
     return;
   }
-  e.buf.add(`LD ${reg(dest)},${e.fn.poolConstant(sym.offset)}`);
+  e.buf.add(`LD ${reg(dest)},${e.fn.poolConstant(sym.offset)}`, 'load');
   e.buf.add(`ADD ${reg(dest)},${base},${reg(dest)}`);
 }
 
@@ -804,7 +865,7 @@ function materializeAddressOffset(offset: number, e: FrameEmit): void {
     e.buf.add(`ADD R0,R0,#${offset}`);
     return;
   }
-  e.buf.add(`LD R3,${e.fn.poolConstant(offset)}`);
+  e.buf.add(`LD R3,${e.fn.poolConstant(offset)}`, 'load');
   e.buf.add('ADD R0,R0,R3');
 }
 
@@ -1260,7 +1321,7 @@ function emitOpCall(entry: 'RTMUL' | 'RTDIV' | 'RTMOD', sectionKey: string, e: F
   e.buf.add('STR R0,R6,#0');
   e.buf.add('ADD R6,R6,#-1');
   e.buf.add('STR R1,R6,#0');
-  e.buf.add(`JSR ${entry}`);
+  e.buf.add(`JSR ${entry}`, 'call');
   e.buf.add('LDR R0,R6,#0');
   const cleanupStart = e.buf.nextLineNo;
   e.buf.add('ADD R6,R6,#3');
@@ -1431,13 +1492,13 @@ function emitShortCircuitAnd(expr: Binary, e: FrameEmit): void {
   const doneLabel = e.fn.nextLabel();
   emitExpr(expr.left, e);
   e.buf.add('ADD R0,R0,#0');
-  e.buf.add(`BRz ${falseLabel}`);
+  e.buf.add(`BRz ${falseLabel}`, 'branch');
   emitExpr(expr.right, e);
   e.buf.add('ADD R0,R0,#0');
-  e.buf.add(`BRz ${falseLabel}`);
+  e.buf.add(`BRz ${falseLabel}`, 'branch');
   e.buf.add('AND R0,R0,#0');
   e.buf.add('ADD R0,R0,#1');
-  e.buf.add(`BR ${doneLabel}`);
+  e.buf.add(`BR ${doneLabel}`, 'branch');
   e.buf.add(falseLabel);
   e.buf.add('AND R0,R0,#0');
   e.buf.add(doneLabel);
@@ -1448,12 +1509,12 @@ function emitShortCircuitOr(expr: Binary, e: FrameEmit): void {
   const doneLabel = e.fn.nextLabel();
   emitExpr(expr.left, e);
   e.buf.add('ADD R0,R0,#0');
-  e.buf.add(`BRnp ${trueLabel}`);
+  e.buf.add(`BRnp ${trueLabel}`, 'branch');
   emitExpr(expr.right, e);
   e.buf.add('ADD R0,R0,#0');
-  e.buf.add(`BRnp ${trueLabel}`);
+  e.buf.add(`BRnp ${trueLabel}`, 'branch');
   e.buf.add('AND R0,R0,#0');
-  e.buf.add(`BR ${doneLabel}`);
+  e.buf.add(`BR ${doneLabel}`, 'branch');
   e.buf.add(trueLabel);
   e.buf.add('AND R0,R0,#0');
   e.buf.add('ADD R0,R0,#1');
@@ -1549,9 +1610,9 @@ function emitTernary(expr: { cond: Expr; then: Expr; else: Expr }, e: FrameEmit)
   const doneLabel = e.fn.nextLabel();
   emitExpr(expr.cond, e);
   e.buf.add('ADD R0,R0,#0');
-  e.buf.add(`BRz ${elseLabel}`);
+  e.buf.add(`BRz ${elseLabel}`, 'branch');
   emitExpr(expr.then, e);
-  e.buf.add(`BR ${doneLabel}`);
+  e.buf.add(`BR ${doneLabel}`, 'branch');
   e.buf.add(elseLabel);
   emitExpr(expr.else, e);
   e.buf.add(doneLabel);
@@ -1605,7 +1666,7 @@ function emitCall(expr: Call, e: FrameEmit, resultUsed: boolean): void {
         );
       }
       const ptrLabel = e.fn.poolString(arg.value);
-      e.buf.add(`LD R0,${ptrLabel}`);
+      e.buf.add(`LD R0,${ptrLabel}`, 'load');
     } else if (e.fn.calleeParamType(expr.callee, i) === 'bool') {
       // Passing a value to a bool parameter is a conversion to bool.
       emitValueAsBool(arg, e);
@@ -1615,7 +1676,7 @@ function emitCall(expr: Call, e: FrameEmit, resultUsed: boolean): void {
     e.buf.add('ADD R6,R6,#-1');
     e.buf.add('STR R0,R6,#0');
   }
-  e.buf.add(`JSR ${e.fn.calleeLabel(expr.callee)}`);
+  e.buf.add(`JSR ${e.fn.calleeLabel(expr.callee)}`, 'call');
   if (resultUsed) e.buf.add('LDR R0,R6,#0');
 
   const cleanupStart = e.buf.nextLineNo;
@@ -1719,7 +1780,7 @@ function emitStringArrayLocalInit(text: string, sym: VarSymbol, e: FrameEmit): v
   const words = sym.initWords.length;
   const label = e.fn.addLocalStringInit(text, words, sym.name);
   emitAddressOfSymbol(0, sym, e); // dest address -> R0
-  e.buf.add(`LD R1,${e.fn.poolLabelAddress(label)}`); // src address -> R1
+  e.buf.add(`LD R1,${e.fn.poolLabelAddress(label)}`, 'load'); // src address -> R1
   emitConstant(2, words, e.buf, e.fn); // counter -> R2
   const loop = e.fn.nextLabel();
   e.buf.add(loop);
@@ -1764,7 +1825,7 @@ function emitExprStmt(expr: Expr | null, line: number, e: FrameEmit, prog: ProgC
 function emitCondBranch(cond: Expr, falseTarget: string, e: FrameEmit): void {
   emitExpr(cond, e);
   e.buf.add('ADD R0,R0,#0');
-  e.buf.add(`BRz ${falseTarget}`);
+  e.buf.add(`BRz ${falseTarget}`, 'branch');
 }
 
 function emitIf(stmt: If, e: FrameEmit, prog: ProgCtx): void {
@@ -1782,7 +1843,7 @@ function emitIf(stmt: If, e: FrameEmit, prog: ProgCtx): void {
 
   if (stmt.else !== null) {
     const start2 = e.buf.nextLineNo;
-    e.buf.add(`BR ${doneLabel}`);
+    e.buf.add(`BR ${doneLabel}`, 'branch');
     e.buf.add(elseLabel);
     e.buf.entry(stmt.line, 'stmt', start2, e.buf.lastLineNo);
 
@@ -1817,7 +1878,7 @@ function emitWhile(stmt: While, e: FrameEmit, prog: ProgCtx): void {
   e.fn.continueLabels.pop();
 
   const start2 = e.buf.nextLineNo;
-  e.buf.add(`BR ${topLabel}`);
+  e.buf.add(`BR ${topLabel}`, 'branch');
   e.buf.add(doneLabel);
   e.buf.entry(stmt.line, 'stmt', start2, e.buf.lastLineNo);
 }
@@ -1844,8 +1905,8 @@ function emitDoWhile(stmt: DoWhile, e: FrameEmit, prog: ProgCtx): void {
   const entriesBefore2 = e.buf.entries.length;
   emitExpr(stmt.cond, e);
   e.buf.add('ADD R0,R0,#0');
-  e.buf.add(`BRz ${doneLabel}`);
-  e.buf.add(`BR ${topLabel}`);
+  e.buf.add(`BRz ${doneLabel}`, 'branch');
+  e.buf.add(`BR ${topLabel}`, 'branch');
   e.buf.add(doneLabel);
   wrapEntry(e.buf, stmt.line, 'stmt', start2, e.buf.lastLineNo, entriesBefore2);
 }
@@ -1886,7 +1947,7 @@ function emitFor(stmt: For, e: FrameEmit, prog: ProgCtx): void {
   e.buf.add(updateLabel);
   const entriesBefore2 = e.buf.entries.length;
   if (stmt.update) emitExprDiscardResult(stmt.update, e);
-  e.buf.add(`BR ${topLabel}`);
+  e.buf.add(`BR ${topLabel}`, 'branch');
   e.buf.add(doneLabel);
   wrapEntry(e.buf, stmt.line, 'stmt', start2, e.buf.lastLineNo, entriesBefore2);
 }
@@ -1933,10 +1994,10 @@ function emitSwitch(stmt: Switch, e: FrameEmit, prog: ProgCtx): void {
     e.buf.add('NOT R0,R0');
     e.buf.add('ADD R0,R0,#1');
     e.buf.add('ADD R0,R1,R0');
-    e.buf.add(`BRz ${caseLabels[i]}`);
+    e.buf.add(`BRz ${caseLabels[i]}`, 'branch');
   }
   e.fn.temps.pop();
-  e.buf.add(`BR ${defaultLabel ?? doneLabel}`);
+  e.buf.add(`BR ${defaultLabel ?? doneLabel}`, 'branch');
   wrapEntry(e.buf, stmt.line, 'stmt', start, e.buf.lastLineNo, entriesBefore);
 
   e.fn.breakLabels.push(doneLabel);
@@ -1983,11 +2044,11 @@ function emitReturn(stmt: Return, e: FrameEmit, prog: ProgCtx): void {
     wrapEntry(e.buf, stmt.line, 'stmt', start, e.buf.lastLineNo, entriesBefore);
     const epilogueStart = e.buf.nextLineNo;
     e.buf.add('STR R0,R5,#3');
-    e.buf.add(`BR ${e.fn.epilogueLabel}`);
+    e.buf.add(`BR ${e.fn.epilogueLabel}`, 'branch');
     e.buf.entry(stmt.line, 'epilogue', epilogueStart, e.buf.lastLineNo);
     return;
   }
-  e.buf.add(`BR ${e.fn.epilogueLabel}`);
+  e.buf.add(`BR ${e.fn.epilogueLabel}`, 'branch');
   wrapEntry(e.buf, stmt.line, 'stmt', start, e.buf.lastLineNo, entriesBefore);
 }
 
@@ -1995,7 +2056,7 @@ function emitBreak(stmt: Break, e: FrameEmit): void {
   const target = e.fn.breakLabels[e.fn.breakLabels.length - 1];
   if (!target) throw new Error('codegen: break outside a loop/switch (checker-enforced)');
   const start = e.buf.nextLineNo;
-  e.buf.add(`BR ${target}`);
+  e.buf.add(`BR ${target}`, 'branch');
   e.buf.entry(stmt.line, 'stmt', start, e.buf.lastLineNo);
 }
 
@@ -2003,7 +2064,7 @@ function emitContinue(stmt: Continue, e: FrameEmit): void {
   const target = e.fn.continueLabels[e.fn.continueLabels.length - 1];
   if (!target) throw new Error('codegen: continue outside a loop (checker-enforced)');
   const start = e.buf.nextLineNo;
-  e.buf.add(`BR ${target}`);
+  e.buf.add(`BR ${target}`, 'branch');
   e.buf.entry(stmt.line, 'stmt', start, e.buf.lastLineNo);
 }
 
@@ -2097,8 +2158,8 @@ function emitFunction(decl: FuncDecl, frame: FuncFrame, prog: ProgCtx): void {
   // hot path and read as noise on the datapath. Line count is the trigger and
   // it over-counts (comments and labels carry no word), so islands land earlier
   // than strictly needed — the safe direction. A single statement longer than
-  // the margin can still overrun, and checkPcRelativeReach still reports that
-  // honestly from final addresses.
+  // the margin can still overrun; relaxPcRelativeReach then gives each load
+  // that cannot reach its word an inline copy.
   for (const s of decl.body!.stmts) {
     emitStmt(s, e, prog);
     if (bodyBuf.lastLineNo - fn.poolAnchor >= POOL_ISLAND_INTERVAL) fn.flushPoolIsland(bodyBuf);
@@ -2159,16 +2220,16 @@ function emitFunction(decl: FuncDecl, frame: FuncFrame, prog: ProgCtx): void {
   prog.buf.entry(decl.line, 'prologue', prologueStart, prog.buf.lastLineNo);
 
   const offset = prog.buf.lastLineNo;
-  for (const line of bodyBuf.lines) prog.buf.add(line);
+  bodyBuf.lines.forEach((line, index) => prog.buf.add(line, bodyBuf.marks[index]));
   for (const entry of bodyBuf.entries) {
     prog.buf.entry(entry.cLine, entry.kind, entry.asmStart + offset, entry.asmEnd + offset);
   }
 
   // The remaining literal pool is placed immediately after this function's
-  // body. checkPcRelativeReach validates each referencing LD, like every BR,
+  // body. relaxPcRelativeReach measures each referencing LD, like every BR,
   // against the target's final laid-out address. Using actual program-wide
-  // addresses makes the check exact for forward and backward spans and covers
-  // loops, branches, calls, and pool loads uniformly. No predictive
+  // addresses makes the measurement exact for forward and backward spans and
+  // covers loops, branches, calls, and pool loads uniformly. No predictive
   // per-function reach estimate is needed at this point in emission.
   // Earlier islands have already been embedded near their own users.
   if (fn.pool.length > 0) {
@@ -2222,8 +2283,8 @@ function emitFunction(decl: FuncDecl, frame: FuncFrame, prog: ProgCtx): void {
 // known before the data section is written — see codegen()'s own comment);
 // appending the runtime immediately after keeps it as close as possible to
 // the JSRs that reach it (every `JSR F_<runtimeName>` a user function
-// emits), which matters for checkPcRelativeReach's PCoffset11 budget on
-// large programs, and keeps each section's own internal LDs (its literal
+// emits), which keeps most of those calls inside JSR's PCoffset11 reach, and
+// keeps each section's own internal LDs (its literal
 // pool) nowhere near the growing globals/strings section, which has no size
 // bound this file enforces. Splicing before the globals section rather than
 // after also means a program that both declares many globals AND calls
@@ -2551,7 +2612,7 @@ function emitCrt0(prog: ProgCtx): void {
   prog.buf.add('LD R6,CRT0_STACK');
   // The entry point keeps the readable `main` base (buildFuncLabels processes
   // it first), so this is `JSR F_main` unless an ordinary `Main` also exists.
-  prog.buf.add(`JSR F_${prog.funcLabels.get('main') ?? 'main'}`);
+  prog.buf.add(`JSR F_${prog.funcLabels.get('main') ?? 'main'}`, 'call');
   prog.buf.add('ADD R6,R6,#1'); // pop the return-value slot; main takes no arguments
   prog.buf.add('HALT');
   prog.buf.add('CRT0_GLOBAL .FILL GLOBAL');
@@ -2567,20 +2628,23 @@ function emitCrt0(prog: ProgCtx): void {
 }
 
 // =========================================================================
-// Program-level PC-relative relocation uses one final-address pass over the
+// Program-level PC-relative relocation works from final addresses over the
 // laid-out image. It resolves every branch (PCoffset9), PC-relative load or
-// store (PCoffset9), and direct call (PCoffset11), then checks the actual span
-// against the exact hardware field range enforced by the assembler. Actual
-// addresses cover forward and backward loop branches, function epilogues,
-// literal pools, runtime calls, and crt0's call to main with one rule.
-// The pass runs only after complete layout because any source or target can
+// store (PCoffset9), and direct call (PCoffset11), and measures the actual
+// span against the exact hardware field range enforced by the assembler.
+// Actual addresses cover forward and backward loop branches, function
+// epilogues, literal pools, runtime calls, and crt0's call to main with one
+// rule. It runs only after complete layout because any source or target can
 // depend on the sizes of functions, pools, and runtime sections emitted before
-// it. This same finality makes the check exact: it neither assumes a worst-case
-// source position nor omits an instruction class. Diagnostics attach to the
-// containing function when possible and otherwise use the program entry point.
-// The separate image-size guard uses the same completed layout for the memory
-// partition boundary. Together they validate field reach and total footprint
-// without conflating those two capacity constraints.
+// it. This same finality makes the measurement exact: it neither assumes a
+// worst-case source position nor omits an instruction class.
+//
+// Two passes share that measurement. relaxPcRelativeReach rewrites each
+// registered site that is out of reach into its far form, so a program is
+// never rejected for how far apart its code landed. checkPcRelativeReach then
+// verifies the result: a span that still does not fit is a compiler defect and
+// is reported as one. The separate image-size guard uses the same completed
+// layout for the memory partition boundary.
 // =========================================================================
 
 // Return the label a line binds to the current address, or null. Generated
@@ -2611,7 +2675,7 @@ function lineLabel(t: string): string | null {
 // per-line word count lineWordCount already uses, recording each label's
 // address as the address of the line it sits on. `.ORIG`/`.END` and comments
 // count as zero words via lineWordCount.
-function labelAddresses(lines: string[]): Map<string, number> {
+function labelAddresses(lines: readonly string[]): Map<string, number> {
   const addrs = new Map<string, number>();
   let addr = 0;
   for (const line of lines) {
@@ -2645,17 +2709,182 @@ const JSR_LABEL_RE = /^JSR\s+(\S+)$/i;
 interface PcRelativeSpan {
   label: string;
   bits: 9 | 11;
-  isJsr: boolean;
 }
 
 function pcRelativeSpan(t: string): PcRelativeSpan | null {
   let m = BRANCH_LABEL_RE.exec(t);
-  if (m) return { label: m[1], bits: 9, isJsr: false };
+  if (m) return { label: m[1], bits: 9 };
   m = PC_LOAD_LABEL_RE.exec(t);
-  if (m) return { label: m[1], bits: 9, isJsr: false };
+  if (m) return { label: m[1], bits: 9 };
   m = JSR_LABEL_RE.exec(t);
-  if (m) return { label: m[1], bits: 11, isJsr: true };
+  if (m) return { label: m[1], bits: 11 };
   return null;
+}
+
+// ---- reach relaxation ----
+//
+// A registered line whose target lands outside its PC-relative field is
+// replaced by a far form that loads the target from a word placed inline, so
+// the load itself can never be out of reach. Nothing else is touched: a
+// program in which every span fits is emitted exactly as it was laid out.
+//
+// R3 carries the address. It is the standing far-address scratch register and
+// is free at every site an emitter registers; `JMP R3` also disassembles as
+// itself, where `JMP R7` would read as RET. The load sets the condition
+// codes, which is safe because every branch in this generator re-tests its
+// value immediately before branching.
+const INVERSE_CONDITION: Readonly<Record<string, string>> = Object.freeze({
+  n: 'zp',
+  z: 'np',
+  p: 'nz',
+  nz: 'p',
+  np: 'z',
+  zp: 'n',
+});
+
+export interface RelaxOptions {
+  // Test seam: rewrite every registered site, whether or not it is in reach.
+  readonly forceFarForms?: boolean;
+}
+
+interface FarForm {
+  readonly lines: readonly string[];
+  // Indexes into `lines` that are literal words rather than instructions.
+  readonly dataOffsets: readonly number[];
+}
+
+function distance(offset: number): string {
+  return `${Math.abs(offset)} words ${offset < 0 ? 'back' : 'ahead'}`;
+}
+
+function farBranch(text: string, target: string, offset: number, index: number): FarForm {
+  const letters = /^BR([nzp]*)\s/i.exec(text)?.[1].toLowerCase() ?? '';
+  const condition = ['n', 'z', 'p'].filter((letter) => letters.includes(letter)).join('');
+  const word = `FAR_${index}`;
+  const comment = `; far branch: ${target} is ${distance(offset)}, beyond BR's 9-bit reach`;
+  if (condition === '' || condition === 'nzp') {
+    return {
+      lines: [comment, `LD R3,${word}`, 'JMP R3', `${word} .FILL ${target}`],
+      dataOffsets: [3],
+    };
+  }
+  const near = `${word}_NEAR`;
+  return {
+    lines: [
+      comment,
+      `BR${INVERSE_CONDITION[condition]} ${near}`,
+      `LD R3,${word}`,
+      'JMP R3',
+      `${word} .FILL ${target}`,
+      near,
+    ],
+    dataOffsets: [4],
+  };
+}
+
+// A pooled load too far from its pool word loads an inline copy of that word
+// into the same register and branches over it. BR does not touch the
+// condition codes, so they are exactly what the near load would have left.
+function farLiteral(
+  text: string,
+  target: string,
+  value: string,
+  offset: number,
+  index: number,
+): FarForm {
+  const register = /^LD\s+(R[0-7])\s*,/i.exec(text)?.[1] ?? 'R0';
+  const word = `FAR_${index}`;
+  const near = `${word}_NEAR`;
+  return {
+    lines: [
+      `; far literal: ${target} is ${distance(offset)}, beyond LD's 9-bit reach`,
+      `LD ${register},${word}`,
+      `BR ${near}`,
+      `${word} .FILL ${value}`,
+      near,
+    ],
+    dataOffsets: [3],
+  };
+}
+
+// A call too far for JSR goes through JSRR. The return address is the branch
+// that follows, which steps over the inline word.
+function farCall(target: string, offset: number, index: number): FarForm {
+  const word = `FAR_${index}`;
+  const near = `${word}_NEAR`;
+  return {
+    lines: [
+      `; far call: ${target} is ${distance(offset)}, beyond JSR's 11-bit reach`,
+      `LD R3,${word}`,
+      'JSRR R3',
+      `BR ${near}`,
+      `${word} .FILL ${target}`,
+      near,
+    ],
+    dataOffsets: [4],
+  };
+}
+
+// The operand of each `LABEL .FILL operand` line, for inlining a pool word.
+function fillOperands(lines: readonly string[]): Map<string, string> {
+  const operands = new Map<string, string>();
+  for (const line of lines) {
+    const match = /^(\S+)\s+\.FILL\s+(\S+)/i.exec(line.trim());
+    if (match) operands.set(match[1], match[2]);
+  }
+  return operands;
+}
+
+// Rewrites every registered line that is out of reach, then lays the program
+// out again and repeats, because a far form is longer than the line it
+// replaces and can push another span out of reach. A line is rewritten at
+// most once, so this terminates.
+export function relaxPcRelativeReach(buf: LineBuffer, options: RelaxOptions = {}): void {
+  let nextIndex = 0;
+  for (;;) {
+    const addrs = labelAddresses(buf.lines);
+    const pooled = fillOperands(buf.lines);
+    const sites: {
+      lineNo: number;
+      mark: RelaxMark;
+      target: string;
+      offset: number;
+    }[] = [];
+    let addr = 0;
+    for (let i = 0; i < buf.lines.length; i++) {
+      const mark = buf.marks[i];
+      if (mark !== undefined) {
+        const span = pcRelativeSpan(buf.lines[i].trim());
+        const targetAddr = span ? addrs.get(span.label) : undefined;
+        // A load is only rewritable when its target is a literal word to copy.
+        const rewritable = span && (mark !== 'load' || pooled.has(span.label));
+        if (span && rewritable && targetAddr !== undefined) {
+          const offset = targetAddr - (addr + 1);
+          if (options.forceFarForms === true || !pcOffsetFits(offset, span.bits)) {
+            sites.push({ lineNo: i + 1, mark, target: span.label, offset });
+          }
+        }
+      }
+      addr += lineWordCount(buf.lines[i]);
+    }
+    if (sites.length === 0) return;
+
+    // Bottom to top, so earlier line numbers stay valid; numbered top to
+    // bottom, so the labels read in order down the listing.
+    for (let k = sites.length - 1; k >= 0; k--) {
+      const { lineNo, mark, target, offset } = sites[k];
+      const text = buf.lines[lineNo - 1].trim();
+      const index = nextIndex + k;
+      const far =
+        mark === 'branch'
+          ? farBranch(text, target, offset, index)
+          : mark === 'load'
+            ? farLiteral(text, target, pooled.get(target)!, offset, index)
+            : farCall(target, offset, index);
+      buf.replaceLine(lineNo, far.lines, far.dataOffsets);
+    }
+    nextIndex += sites.length;
+  }
 }
 
 // Recovers the C source line to anchor a reach diagnostic at, from the
@@ -2691,65 +2920,67 @@ function attributeCSource(
   return decl ?? funcDeclByName.get(mainLabel) ?? { line: 1, col: 1 };
 }
 
-// Six ~240-word functions with `main` emitted last, or a single function with
-// a loop body / literal pool past the ~255-word branch reach, can put a
-// branch/load/call target out of range with no diagnostic until the assembler
-// rejects it ("label too far away"). Runs once, after every function, the
-// runtime, crt0, and the data sections are fully laid out in `prog.buf`, so
-// every label's final address is known.
-function checkPcRelativeReach(
-  prog: ProgCtx,
-  funcDeclByName: Map<string, FuncDecl>,
-  mainLabel: string,
-): void {
-  const lines = prog.buf.lines;
+// Every PC-relative span in the final layout that does not fit its field.
+// Relaxation has already rewritten each registered site that was out of
+// reach, so anything left is a compiler defect: an emitter produced a
+// transfer it did not register. Each is described for a report.
+export function reachDefects(lines: readonly string[]): { lineNo: number; message: string }[] {
   const addrs = labelAddresses(lines);
-  const lineMap = prog.buf.entries;
-  // One oversized function can put many spans out of range at once (every
-  // literal-pool LD, both of a loop's branches). They all share one root
-  // cause — that construct is too large — so report at most once per anchored
-  // C line rather than flooding the student with a dozen identical errors.
-  const reported = new Set<string>();
+  const defects: { lineNo: number; message: string }[] = [];
   let addr = 0;
-  let currentFunc: string | null = null; // null = inside crt0, before any F_<name> label
   for (let i = 0; i < lines.length; i++) {
-    const t = lines[i].trim();
-    if (!/\s/.test(t) && t.startsWith('F_')) currentFunc = t.slice(2);
-
-    const span = pcRelativeSpan(t);
-    // A resolved label target; a numeric #n offset (or anything not in the
-    // label map) is already fixed and needs no relocation check.
+    const text = lines[i].trim();
+    const span = pcRelativeSpan(text);
+    // A numeric #n offset, or anything not in the label map, is already fixed.
     const targetAddr = span ? addrs.get(span.label) : undefined;
     if (span && targetAddr !== undefined) {
       const offset = targetAddr - (addr + 1); // PC after fetch is addr+1 (assembler.ts)
       if (!pcOffsetFits(offset, span.bits)) {
         const min = -(1 << (span.bits - 1));
         const max = (1 << (span.bits - 1)) - 1;
-        const anchor = attributeCSource(lineMap, i + 1, currentFunc, funcDeclByName, mainLabel);
-        const key = `${anchor.line}:${anchor.col}`;
-        if (!reported.has(key)) {
-          reported.add(key);
-          if (span.isJsr) {
-            const targetName = span.label.startsWith('F_') ? span.label.slice(2) : span.label;
-            const fromName = currentFunc ?? 'crt0';
-            prog.diagnostics.push(
-              capacityErr(
-                anchor,
-                `program too large for the LC-3 call range — '${fromName}' cannot reach '${targetName}': the call is ${offset} words away, but an 11-bit PC-relative offset only reaches ${min} to ${max}`,
-              ),
-            );
-          } else {
-            prog.diagnostics.push(
-              capacityErr(
-                anchor,
-                `this code is too far from its target for a single LC-3 branch/load — the offset is ${offset} words, but a 9-bit PC-relative offset only reaches ${min} to ${max}. The function or loop body is too large.`,
-              ),
-            );
-          }
-        }
+        defects.push({
+          lineNo: i + 1,
+          message: `internal compiler error: '${text}' is ${offset} words from its target, outside the ${span.bits}-bit PC-relative reach of ${min} to ${max}, and has no far form — please report this program`,
+        });
       }
     }
     addr += lineWordCount(lines[i]);
+  }
+  return defects;
+}
+
+// The base name of the function whose F_<name> label most recently precedes
+// this emitted line; null inside crt0, before any function.
+function enclosingFunction(lines: readonly string[], asmLineNo: number): string | null {
+  for (let i = asmLineNo - 1; i >= 0; i--) {
+    const text = lines[i].trim();
+    if (!/\s/.test(text) && text.startsWith('F_')) return text.slice(2);
+  }
+  return null;
+}
+
+// The last pass, run once the whole image is laid out and relaxed. The
+// compiler never returns assembly it has not verified: a span that still does
+// not fit is reported against the C line that produced it, once per line.
+function checkPcRelativeReach(
+  prog: ProgCtx,
+  funcDeclByName: Map<string, FuncDecl>,
+  mainLabel: string,
+): void {
+  const lines = prog.buf.lines;
+  const reported = new Set<string>();
+  for (const defect of reachDefects(lines)) {
+    const anchor = attributeCSource(
+      prog.buf.entries,
+      defect.lineNo,
+      enclosingFunction(lines, defect.lineNo),
+      funcDeclByName,
+      mainLabel,
+    );
+    const key = `${anchor.line}:${anchor.col}`;
+    if (reported.has(key)) continue;
+    reported.add(key);
+    prog.diagnostics.push(err(anchor, defect.message));
   }
 }
 
@@ -3053,7 +3284,11 @@ function buildFuncLabels(
 // Entry point.
 // =========================================================================
 
-export function codegen(program: Program, symbols: SymbolTables, source: string): CodegenResult {
+function newProgCtx(
+  program: Program,
+  symbols: SymbolTables,
+  source: string,
+): { prog: ProgCtx; mainLabel: string } {
   const reservedRuntimeBases = runtimeLabelBasesForProgram(program);
   const funcLabels = buildFuncLabels([...symbols.functions.keys()], reservedRuntimeBases);
   const mainLabel = funcLabels.get('main') ?? 'main';
@@ -3068,7 +3303,16 @@ export function codegen(program: Program, symbols: SymbolTables, source: string)
     strings: [],
     sourceLines: source.split(/\r\n|\r|\n/),
   };
+  return { prog, mainLabel };
+}
 
+// Lays the whole program out in one buffer, through `.END`. A runaway
+// emission throws EmittedLinesExceededError.
+function emitProgram(
+  prog: ProgCtx,
+  program: Program,
+  symbols: SymbolTables,
+): { funcDeclByName: Map<string, FuncDecl>; hasMain: boolean } {
   // crt0 is generated only when the program defines `main` with a body.
   // Synthetic single-function fragments have no main and remain bare assembly
   // without .ORIG/.END. A full program with main receives the complete crt0
@@ -3076,45 +3320,69 @@ export function codegen(program: Program, symbols: SymbolTables, source: string)
   // .END image. This distinction preserves fragment use while making runnable
   // programs directly assemblable.
   const hasMain = symbols.functions.has('main');
+  if (hasMain) emitCrt0(prog);
+
+  // Functions emit first so string literals discovered during their
+  // bodies are known before the data section is written. funcDeclByName
+  // also anchors the JSR-reach guard's diagnostics at the calling
+  // function's own declaration — keyed by the MANGLED label base, since the
+  // reach pass recovers the current function from the emitted F_<base> label.
+  const funcDeclByName = new Map<string, FuncDecl>();
+  for (const decl of program.decls) {
+    if (decl.kind === 'FuncDecl' && decl.body) {
+      const frame = symbols.functions.get(decl.name);
+      if (!frame) continue;
+      emitFunction(decl, frame, prog);
+      funcDeclByName.set(prog.funcLabels.get(decl.name) ?? decl.name, decl);
+    }
+  }
+
+  const heapRuntimeSpliced = emitRuntimeIfNeeded(prog);
+
+  emitGlobalsSection(program, symbols, prog, hasMain);
+  emitStringSection(prog);
+
+  if (heapRuntimeSpliced) {
+    // The assembler does not bind a final bare label before .END and rejects a
+    // zero-length .BLKW. This sacrificial word is therefore the concrete
+    // IMAGE_END label. RTHP_BASE points at the word itself, and first-time
+    // allocator initialization deliberately reclaims/overwrites its zero.
+    const start = prog.buf.nextLineNo;
+    prog.buf.add(`${IMAGE_END_LABEL} .FILL #0`);
+    prog.buf.entry(null, 'data', start, prog.buf.lastLineNo);
+  }
+
+  if (hasMain) prog.buf.add('.END');
+  return { funcDeclByName, hasMain };
+}
+
+// Test seam: the program as laid out, before any far form is applied.
+export function layoutForTest(
+  program: Program,
+  symbols: SymbolTables,
+  source: string,
+): { lines: readonly string[]; marks: readonly (RelaxMark | undefined)[] } {
+  const { prog } = newProgCtx(program, symbols, source);
+  emitProgram(prog, program, symbols);
+  return { lines: prog.buf.lines, marks: prog.buf.marks };
+}
+
+// `options` is a test seam for building the all-far image; compileC passes none.
+export function codegen(
+  program: Program,
+  symbols: SymbolTables,
+  source: string,
+  options: RelaxOptions = {},
+): CodegenResult {
+  const { prog, mainLabel } = newProgCtx(program, symbols, source);
 
   // A runaway emission trips LineBuffer's MAX_EMITTED_LINES
   // backstop, which throws. Turn it into a named capacity diagnostic here
   // rather than letting it escape as an unexpected exception.
   try {
-    if (hasMain) emitCrt0(prog);
+    const { funcDeclByName, hasMain } = emitProgram(prog, program, symbols);
 
-    // Functions emit first so string literals discovered during their
-    // bodies are known before the data section is written. funcDeclByName
-    // also anchors the JSR-reach guard's diagnostics at the calling
-    // function's own declaration — keyed by the MANGLED label base, since the
-    // reach pass recovers the current function from the emitted F_<base> label.
-    const funcDeclByName = new Map<string, FuncDecl>();
-    for (const decl of program.decls) {
-      if (decl.kind === 'FuncDecl' && decl.body) {
-        const frame = symbols.functions.get(decl.name);
-        if (!frame) continue;
-        emitFunction(decl, frame, prog);
-        funcDeclByName.set(funcLabels.get(decl.name) ?? decl.name, decl);
-      }
-    }
-
-    const heapRuntimeSpliced = emitRuntimeIfNeeded(prog);
-
-    emitGlobalsSection(program, symbols, prog, hasMain);
-    emitStringSection(prog);
-
-    if (heapRuntimeSpliced) {
-      // The assembler does not bind a final bare label before .END and rejects a
-      // zero-length .BLKW. This sacrificial word is therefore the concrete
-      // IMAGE_END label. RTHP_BASE points at the word itself, and first-time
-      // allocator initialization deliberately reclaims/overwrites its zero.
-      const start = prog.buf.nextLineNo;
-      prog.buf.add(`${IMAGE_END_LABEL} .FILL #0`);
-      prog.buf.entry(null, 'data', start, prog.buf.lastLineNo);
-    }
-
-    if (hasMain) prog.buf.add('.END');
-
+    relaxPcRelativeReach(prog.buf, options);
     checkPcRelativeReach(prog, funcDeclByName, mainLabel);
     // The image/stack partition guard applies only when `main` gives crt0 its
     // `.ORIG x3000` wrapper and the xF000 stack it must not collide with; a

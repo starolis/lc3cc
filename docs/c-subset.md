@@ -130,6 +130,35 @@ value of zero does not trap or terminate. A constant shift count must be from 0
 through 15. Runtime counts at or below zero leave the value unchanged; counts
 of 16 or more produce zero for left shift and sign fill for right shift.
 
+### Code out of reach
+
+LC-3 branches, `LD`, and `JSR` name their targets as a distance from the
+program counter. A branch or `LD` reaches from 256 words back to 255 words
+ahead; `JSR` reaches from 1024 back to 1023 ahead. Generated code is not
+limited by that. Where a target lands farther away, the compiler emits a
+longer form in place of the single instruction and says so in a comment on the
+line before it:
+
+```asm
+; far branch: L_main_1 is 640 words ahead, beyond BR's 9-bit reach
+BRnp FAR_1_NEAR
+LD R3,FAR_1
+JMP R3
+FAR_1 .FILL L_main_1
+FAR_1_NEAR
+```
+
+The branch above was a `BRz` to `L_main_1`. It became the opposite branch
+around a jump through `R3`, with the target's address in the word after the
+jump. A far call is `LD R3` and `JSRR R3` followed by a branch over its
+address word. A far literal is a copy of the pooled word placed beside the
+load, with a branch over it. `R3` holds nothing the program needs at any of
+these points.
+
+The line map reports each inline address or literal word as a `data` mapping
+with a `null` C line. A program that needs none of these forms compiles to the
+same assembly that version 1.0.0 emitted.
+
 ## Out-of-scope registry
 
 Each row below has status `out-of-scope` in the compiler feature registry. The
